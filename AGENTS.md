@@ -1,0 +1,3 @@
+# Project Guidelines
+
+@MANDATE.md
