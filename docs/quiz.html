@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>머지 전 퀴즈: 반도체 넷리스트 파싱 및 데이터베이스 구조화</title>
+<style>
+  body { font-family: sans-serif; max-width: 720px; margin: 2rem auto; padding: 0 1rem; line-height: 1.6; }
+  .q { border: 1px solid #ccc; border-radius: 8px; padding: 1rem; margin: 1rem 0; }
+  .q.correct { border-color: #2e7d32; background: #edf7ed; }
+  .q.wrong { border-color: #c62828; background: #fdecea; }
+  #result { font-size: 1.2rem; font-weight: bold; margin: 1rem 0; }
+  button { padding: .6rem 1.2rem; font-size: 1rem; cursor: pointer; }
+  .summary { background: #f5f5f5; border-radius: 8px; padding: 1rem; }
+  label { display: block; }
+  label.answer { color: #2e7d32; font-weight: bold; }
+  .explain { background: #fff8e1; border-radius: 6px; padding: .5rem .8rem; margin-top: .5rem; }
+  .meta { color: #666; font-size: .9rem; margin: -.5rem 0 1rem; }
+</style>
+</head>
+<body>
+<h1>머지 전 퀴즈: 반도체 넷리스트 파싱 및 데이터베이스 구조화</h1>
+<p class="meta">대상: docs/core/specs/netlist-parser.md · 기준: d2c10b9</p>
+<div class="summary">
+<h2>변경 요약</h2>
+반도체 회로의 연결 정보를 담은 텍스트(넷리스트)를 읽어 데이터베이스에 체계적으로 저장하는 기능을 구현했습니다.
+회로를 이루는 부품, 입출력 통로, 신호선, 부품 단자 연결, 별칭 정보를 각각 분리하여 여섯 개 표로 저장합니다.
+실제 회로처럼 상위 모듈과 하위 모듈이 연결된 예시 넷리스트 파일과 실행 코드를 함께 제공합니다.
+설명 글(주석)이 섞여 있거나 이름이 미리 선언되지 않은 신호선이 단자에 연결되어도 자동으로 기본 신호선으로 등록합니다.
+외부 데이터베이스 서버를 설치할 필요 없이 기본 내장 데이터베이스(SQLite)를 사용하여 독립적으로 동작합니다.
+단자 연결 시 이름을 생략하고 순서대로만 연결하는 방식은 모호함을 방지하기 위해 지원하지 않습니다.
+저장 중에 문제가 생기면 작업을 취소하고 원래 상태로 되돌려 데이터가 훼손되지 않도록 보호합니다.
+</div>
+<h2>퀴즈 — 전부 맞혀야 머지 가능</h2>
+<p>답을 고르는 데 필요한 내용은 위 '변경 요약'에 모두 들어 있습니다.</p>
+<div id="quiz"></div>
+<button onclick="grade()">정답 확인</button>
+<div id="result"></div>
+<script>
+const QUESTIONS = [
+  {
+    q: "부품 단자에 연결된 신호선이 사전에 미리 선언되지 않은 상태로 나타났습니다. 이 경우 시스템은 어떻게 처리합니까?",
+    options: [
+      "선언 누락으로 판단하여 처리를 즉시 중단합니다.",
+      "해당 단자의 연결 정보를 저장하지 않고 건너뜁니다.",
+      "기본 1비트 신호선으로 자동 등록하여 저장합니다.",
+      "별칭 신호선으로 취급하여 상위 모듈로 넘깁니다."
+    ],
+    answer: 2,
+    explain: "사전에 선언되지 않은 신호선이 부품 핀에 연결되면 시스템이 1비트 기본 와이어로 자동 등록합니다. 이는 외래키 제약조건 오류를 방지하고 실제 반도체 넷리스트의 암시적 와이어 관례를 충족합니다. 처리 중단이나 누락은 오답입니다."
+  },
+  {
+    q: "부품의 단자를 연결할 때 단자 이름을 적지 않고 순서대로만 나열했습니다. 이 연결 방식에 대해 시스템은 어떻게 반응합니까?",
+    options: [
+      "모호성을 방지하기 위해 지원 대상에서 제외합니다.",
+      "포트 정의 순서대로 자동 매핑하여 정상 저장합니다.",
+      "별칭 테이블에 순서 정보를 임시로 보관합니다.",
+      "경고 메시지만 출력하고 첫 번째 단자에만 연결합니다."
+    ],
+    answer: 0,
+    explain: "단자 이름을 생략하고 순서대로 연결하는 위치 기반 포트 매핑은 모호성을 피하기 위해 의도적으로 지원 범위에서 제외했습니다. 시스템은 이름 지정 방식과 빈 단자만 표준으로 처리합니다. 자동 매핑이나 임시 보관은 지원되지 않습니다."
+  },
+  {
+    q: "수많은 부품 데이터를 데이터베이스에 저장하던 도중 문법 오류가 발생했습니다. 저장소의 상태는 어떻게 됩니까?",
+    options: [
+      "오류 직전까지 성공한 부품들만 부분 저장됩니다.",
+      "모든 작업을 취소하고 저장 시작 전 상태로 되돌립니다.",
+      "오류가 발생한 부품만 제외하고 나머지를 저장합니다.",
+      "문제가 생긴 테이블만 삭제하고 나머지는 유지합니다."
+    ],
+    answer: 1,
+    explain: "데이터베이스 오염을 방지하기 위해 전체 저장이 단일 트랜잭션으로 보호됩니다. 작업 중 오류가 발생하면 롤백을 수행하여 저장 전 상태로 완전히 되돌립니다. 부분 저장이나 문제 부품만 제외하는 방식은 데이터 일관성을 해치므로 적용하지 않습니다."
+  },
+  {
+    q: "파싱이 끝난 반도체 회로 정보는 데이터베이스에 어떤 형태로 구조화되어 저장됩니까?",
+    options: [
+      "모든 계층을 단일 텍스트 파일 하나로 합쳐서 저장합니다.",
+      "모듈 단위로 전체 속성을 긴 문서 형태로 보관합니다.",
+      "회로 연결망만 단일 그래프 테이블에 모아서 저장합니다.",
+      "모듈, 포트, 신호선, 소자, 핀, 별칭 표로 분리 저장합니다."
+    ],
+    answer: 3,
+    explain: "시스템은 회로 구성요소를 모듈, 포트, 신호선, 소자, 핀, 별칭의 여섯 개 정규화 테이블로 분리하여 저장합니다. 이를 통해 부품과 연결 정보 간의 관계를 명확히 유지하고 계층별 조회를 지원합니다. 단일 문서나 단일 그래프 테이블 저장은 기각된 대안입니다."
+  },
+  {
+    q: "여러 가닥의 전선이 묶인 다중 비트 신호선은 데이터베이스에 어떤 방식으로 기록됩니까?",
+    options: [
+      "신호선 이름과 비트 폭 메타데이터를 유지하여 저장합니다.",
+      "모든 신호선을 1비트 단위의 개별 전선으로 분해합니다.",
+      "가장 앞쪽 1비트 신호선만 남기고 나머지는 삭제합니다.",
+      "외부 텍스트 파일에 원본 그대로 별도 백업합니다."
+    ],
+    answer: 0,
+    explain: "다중 비트 신호선은 비트 블라스팅으로 분해하지 않고 신호선 이름과 폭, 범위 메타데이터를 유지하여 저장합니다. 이를 통해 데이터베이스 저장 용량을 절약하고 회로 원본 구조를 유지합니다. 개별 비트 분해나 삭제는 기각되었습니다."
+  }
+];
+const quiz = document.getElementById("quiz");
+QUESTIONS.forEach((it, i) => {
+  const d = document.createElement("div");
+  d.className = "q"; d.id = "q" + i;
+  d.innerHTML = "<p><b>Q" + (i + 1) + ".</b> " + it.q + "</p>" +
+    it.options.map((o, j) =>
+      '<label><input type="radio" name="q' + i + '" value="' + j + '"> ' + o + "</label>"
+    ).join("") +
+    '<div class="explain" hidden><b>해설.</b> ' + it.explain + "</div>";
+  quiz.appendChild(d);
+});
+function grade() {
+  let ok = 0;
+  QUESTIONS.forEach((it, i) => {
+    const sel = document.querySelector('input[name="q' + i + '"]:checked');
+    const el = document.getElementById("q" + i);
+    const good = sel && Number(sel.value) === it.answer;
+    el.className = "q " + (good ? "correct" : "wrong");
+    el.querySelectorAll("label")[it.answer].classList.add("answer");
+    el.querySelector(".explain").hidden = false;
+    if (good) ok++;
+  });
+  const r = document.getElementById("result");
+  r.textContent = ok === QUESTIONS.length
+    ? "통과 (" + ok + "/" + QUESTIONS.length + ") — 머지 가능"
+    : "미통과 (" + ok + "/" + QUESTIONS.length + ") — 오답 확인 후 재시도. 머지 금지";
+}
+</script>
+</body>
+</html>
